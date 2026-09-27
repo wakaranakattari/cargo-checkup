@@ -22,15 +22,16 @@
 //!
 //! Severity rationale. Findings are `Info`: multiplicity is often legitimate
 //! (irreconcilable majors) and unifying it is an optimization, not a defect
-//! repair. The hint names the unify command together with the attribution,
-//! leaving the decision to the engineer.
+//! repair. Every finding carries a best-effort `CargoUpdate` action: the
+//! update succeeds exactly when semver permits unification and is a harmless
+//! no-op otherwise.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
 use cargo_metadata::Metadata;
 
-use crate::model::{CheckKind, Finding, Severity};
+use crate::model::{CheckKind, Finding, FixAction, Severity};
 
 /// Renders the attribution lines for one duplicated crate, one line per
 /// locked version in the given order. For version `v`, the line enumerates
@@ -166,7 +167,8 @@ pub fn check_duplicates(metadata: &Metadata, workspace_root: &Path) -> Vec<Findi
                 .with_hint(format!(
                     "run `cargo update -p {name}` to unify, if semver allows. {}",
                     lines.join("; ")
-                )),
+                ))
+                .with_fix(FixAction::CargoUpdate { package: name }),
             );
         }
     }

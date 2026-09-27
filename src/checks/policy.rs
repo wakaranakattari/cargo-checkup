@@ -127,7 +127,15 @@ pub fn check_policy(metadata: &Metadata, cfg: &CheckupConfig) -> Vec<Finding> {
                             cfg.msrv.version.as_deref().unwrap_or("")
                         ),
                     )
-                    .with_hint("bump `rust-version` in Cargo.toml"),
+                    .with_hint("bump `rust-version` in Cargo.toml or run with --fix")
+                    .with_fix(crate::model::FixAction::SetManifestField {
+                        manifest: pkg
+                            .manifest_path
+                            .as_std_path()
+                            .to_string_lossy()
+                            .into_owned(),
+                        field: "rust-version".to_string(),
+                    }),
                 ),
                 _ => {}
             }

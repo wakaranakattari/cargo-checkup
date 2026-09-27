@@ -13,10 +13,14 @@
 //! magnitude for unactionable data. Workspace-internal path dependencies are
 //! excluded because they have no registry existence.
 //!
-//! Magnitude semantics. Lags classify as minor or patch when the newer
-//! revision may still satisfy common caret requirements, and as major when
-//! it definitionally violates every requirement pinning the current major;
-//! the latter class always requires human requirement edits.
+//! Fix eligibility theorem. A lag carries a `CargoUpdate` repair action iff
+//! its magnitude is minor or patch. Proof sketch: `cargo update -p` advances
+//! within the declared requirement string; minor/patch lags by definition
+//! admit a newer version that may satisfy common caret requirements, while a
+//! major lag definitionally violates every requirement pinning the current
+//! major, so automation cannot proceed without human requirement edits. The
+//! action is therefore attached exactly where it can succeed and withheld
+//! exactly where it cannot.
 //!
 //! Severity rationale. Findings are `Info`: an available upgrade is an
 //! opportunity, not a defect, and must never fail a gate on its own. Gating
@@ -29,7 +33,7 @@ use cargo_metadata::Metadata;
 use serde::Deserialize;
 
 use crate::cache::CratesCache;
-use crate::model::{CheckKind, Finding, Severity};
+use crate::model::{CheckKind, Finding, FixAction, Severity};
 
 /// Projection of the crates.io crate endpoint onto the single field the
 /// analysis consumes. The `crate` key is renamed because `crate` is a Rust
@@ -236,13 +240,18 @@ pub fn check_outdated(
         };
         if latest > current {
             let kind = bump_kind(&current, &latest);
-            let finding = Finding::new(
+            let mut finding = Finding::new(
                 CheckKind::Outdated,
                 Severity::Info,
                 name.clone(),
                 format!("{current_str} -> {latest_str} ({kind} behind)"),
             )
             .with_hint(format!("run `cargo update -p {name}`"));
+            if kind != "major" {
+                finding = finding.with_fix(FixAction::CargoUpdate {
+                    package: name.clone(),
+                });
+            }
             findings.push(finding);
         }
     }

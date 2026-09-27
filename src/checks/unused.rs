@@ -38,7 +38,7 @@ use std::path::{Path, PathBuf};
 use cargo_metadata::{DependencyKind, Metadata};
 use walkdir::WalkDir;
 
-use crate::model::{CheckKind, Finding, Severity};
+use crate::model::{CheckKind, Finding, FixAction, Severity};
 
 /// Reads the full text of every `.rs` file under `pkg_dir` into memory.
 /// Traversal prunes `target/` and `.git/` directories at the filter stage,
@@ -113,8 +113,10 @@ fn appears_feature_gated(sources: &[String], dep_name: &str) -> bool {
 /// the corpus is read once and every in-scope dependency is tested against
 /// it; dependencies appearing under several target tables are deduplicated
 /// by (manifest name, is-build) so that one declaration yields at most one
-/// finding. Ordering of the output is unspecified; the orchestrator imposes
-/// canonical order downstream.
+/// finding. Each finding carries a `RemoveDep` fix action binding the exact
+/// owning manifest and the exact `Cargo.toml` key, which makes `--fix`
+/// a pure function of the findings. Ordering of the output is unspecified;
+/// the orchestrator imposes canonical order downstream.
 pub fn check_unused(metadata: &Metadata, strict: bool) -> Vec<Finding> {
     let mut findings = Vec::new();
     // Index of package id to package descriptor, projecting the flat
@@ -151,7 +153,10 @@ pub fn check_unused(metadata: &Metadata, strict: bool) -> Vec<Finding> {
             // `rename`) are searched under their effective identifier; all
             // others fall back to the hyphen-to-underscore normalization.
             let toml_name = dep.name.clone();
-            let lib_ident = dep.rename.clone().unwrap_or_else(|| toml_name.replace('-', "_"));
+            let lib_ident = dep
+                .rename
+                .clone()
+                .unwrap_or_else(|| toml_name.replace('-', "_"));
             // Development kind was excluded above, so the remaining kinds
             // (normal, build, unknown) are all treated as analyzable; build
             // dependencies are covered because build.rs is in the corpus.
@@ -166,7 +171,11 @@ pub fn check_unused(metadata: &Metadata, strict: bool) -> Vec<Finding> {
                     DependencyKind::Build => "build-",
                     _ => "",
                 };
-                let manifest = pkg.manifest_path.as_std_path().to_string_lossy().into_owned();
+                let manifest = pkg
+                    .manifest_path
+                    .as_std_path()
+                    .to_string_lossy()
+                    .into_owned();
                 findings.push(Finding {
                     check: CheckKind::Unused,
                     severity: Severity::Warn,
@@ -178,6 +187,10 @@ pub fn check_unused(metadata: &Metadata, strict: bool) -> Vec<Finding> {
                     )),
                     manifest_path: Some(manifest.clone()),
                     dep_name: Some(toml_name.clone()),
+                    fix: Some(FixAction::RemoveDep {
+                        manifest,
+                        dep: toml_name,
+                    }),
                 });
             }
         }
@@ -194,7 +207,10 @@ mod tests {
     /// deterministic (idempotent observation).
     #[test]
     fn detects_used_and_unused_idents() {
-        let sources = vec!["use serde_json::Value;".to_string(), "fn f() {}".to_string()];
+        let sources = vec![
+            "use serde_json::Value;".to_string(),
+            "fn f() {}".to_string(),
+        ];
         assert!(appears_used(&sources, "serde_json"));
         assert!(!appears_used(&sources, "tokio"));
         assert!(appears_used(&sources, "serde_json")); // idempotent

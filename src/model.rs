@@ -1,20 +1,22 @@
-//! Core data model: finding taxonomy, severity lattice and reports.
+//! Core data model: finding taxonomy, severity lattice, fix actions, reports.
 //!
 //! Ontology. A scan of a Cargo workspace produces a finite multiset of
 //! _findings_. Each finding is classified by exactly one _check kind_ (the
 //! analysis that produced it) and one _severity_ (its gating significance).
-//! A _report_ is the ordered collection of findings of one scan plus scan
-//! metadata (skipped-check notes). The model is serialization-first: every
-//! type derives `Serialize`/`Deserialize` so that the JSON report is a
-//! faithful projection of the in-memory report.
+//! Findings that a machine can repair carry a _fix action_: a declarative,
+//! serializable repair program executed by the fix subsystem. A _report_ is
+//! the ordered collection of findings of one scan plus scan metadata
+//! (skipped-check notes and the suppression count). The model is
+//! serialization-first: every type derives `Serialize`/`Deserialize` so that
+//! the JSON report is a faithful projection of the in-memory report.
 
 use serde::{Deserialize, Serialize};
 
 /// The complete taxonomy of analyses. Each variant corresponds to one check
-/// module under `crate::checks` and to one user-visible name in `--only`
-/// and `--skip`. The set is closed: adding an analysis requires extending
-/// this enum, its string mapping, and the scan orchestrator, which keeps
-/// the CLI surface and the implementation in lockstep by construction.
+/// module under `crate::checks` and to one user-visible name in `--only`,
+/// `--skip` and `--fail-on`. The set is closed: adding an analysis requires
+/// extending this enum, its string mapping, and the scan orchestrator, which
+/// keeps the CLI surface and the implementation in lockstep by construction.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum CheckKind {
@@ -37,7 +39,7 @@ pub enum CheckKind {
 impl CheckKind {
     /// Canonical machine name of the check. The mapping is bijective with
     /// [`CheckKind::parse_list`] inputs (modulo documented aliases), hence
-    /// suitable as a stable key in reports and fingerprints.
+    /// suitable as a stable key in reports, fingerprints and SARIF rule ids.
     pub fn as_str(self) -> &'static str {
         match self {
             CheckKind::Unused => "unused",
@@ -65,12 +67,12 @@ impl CheckKind {
         ]
     }
 
-    /// Parses a comma-separated check list as accepted by `--only` and
-    /// `--skip`. Grammar: case-insensitive tokens with surrounding
-    /// whitespace ignored; empty tokens (from leading, trailing or doubled
-    /// commas) are discarded. Documented aliases (`duplicates`, `audit`,
-    /// `lint`, `ban`, `deny`) normalize to canonical variants. Any other
-    /// token is a hard error naming the offender, which fails the
+    /// Parses a comma-separated check list as accepted by `--only`,
+    /// `--skip` and `--fail-on`. Grammar: case-insensitive tokens with
+    /// surrounding whitespace ignored; empty tokens (from leading, trailing
+    /// or doubled commas) are discarded. Documented aliases (`duplicates`,
+    /// `audit`, `lint`, `ban`, `deny`) normalize to canonical variants.
+    /// Any other token is a hard error naming the offender, which fails the
     /// invocation rather than silently narrowing the analysis.
     pub fn parse_list(s: &str) -> anyhow::Result<Vec<CheckKind>> {
         s.split(',')
@@ -106,6 +108,32 @@ pub enum Severity {
     Error,
 }
 
+/// Declarative, serializable repair program attached to an auto-fixable
+/// finding. The tagged-enum serialization keeps the JSON report
+/// self-describing: each action carries its discriminant (`action`) and its
+/// parameters. The fix subsystem interprets actions; checks only declare
+/// them, which separates analysis from mutation and makes `--check` (dry
+/// run) a pure projection of the same data.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "action", rename_all = "kebab-case")]
+pub enum FixAction {
+    /// Delete dependency `dep` from the `[dependencies]`-family tables of
+    /// the manifest at `manifest`. Idempotent: re-execution after success is
+    /// a no-op reporting zero removals.
+    RemoveDep { manifest: String, dep: String },
+    /// Run `cargo update -p <package>` in the workspace root to advance the
+    /// locked version within the declared requirements. Attached only when
+    /// the lag is a minor or patch lag; major lags require requirement
+    /// edits by a human and therefore carry no action.
+    CargoUpdate { package: String },
+    /// Set `[package] <field>` in the manifest at `manifest` (currently
+    /// `license` or `rust-version`). The value is resolved at apply time
+    /// from the `[fix]`/`[msrv]` configuration, not at check time, so that
+    /// one finding stays valid under different policies. No-op when the
+    /// field is already present.
+    SetManifestField { manifest: String, field: String },
+}
+
 /// A single diagnosed fact.
 ///
 /// - `check` classifies the producing analysis (see [`CheckKind`]).
@@ -113,12 +141,15 @@ pub enum Severity {
 /// - `package` names the subject: a workspace member for manifest findings,
 ///   a locked crate for lockfile findings.
 /// - `detail` states the fact in human terms and embeds the concrete values
-///   (versions, names) that make the finding unique; it participates in
-///   finding identity, hence any change of the underlying facts yields a
+///   (versions, names) that make the finding unique; it participates in the
+///   baseline fingerprint, hence any change of the underlying facts yields a
 ///   textually distinct finding.
 /// - `hint` is the recommended human remediation, omitted from
 ///   serialization when absent.
-/// - `manifest_path`/`dep_name` locate the owning manifest entry.
+/// - `manifest_path`/`dep_name` locate the owning manifest entry for
+///   consumers that address repairs by manifest; the authoritative machine
+///   repair is `fix`.
+/// - `fix` is `Some` iff the finding is machine-repairable.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Finding {
     pub check: CheckKind,
@@ -134,13 +165,16 @@ pub struct Finding {
     /// Dependency name as written in Cargo.toml (for --fix).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub dep_name: Option<String>,
+    /// Machine-readable fix, if the finding is auto-fixable.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub fix: Option<FixAction>,
 }
 
 impl Finding {
     /// Constructor establishing the structural invariant: a fresh finding
     /// carries classification, subject and statement, with all optional
-    /// channels (hint, locations) unset. Callers extend via the builder
-    /// combinator below.
+    /// channels (hint, locations, fix) unset. Callers extend via the
+    /// builder combinators below.
     pub fn new(
         check: CheckKind,
         severity: Severity,
@@ -155,6 +189,7 @@ impl Finding {
             hint: None,
             manifest_path: None,
             dep_name: None,
+            fix: None,
         }
     }
 
@@ -162,6 +197,14 @@ impl Finding {
     /// consumes and returns `Self` with `hint` set.
     pub fn with_hint(mut self, hint: impl Into<String>) -> Self {
         self.hint = Some(hint.into());
+        self
+    }
+
+    /// Attaches the machine repair program. Pure builder combinator:
+    /// consumes and returns `Self` with `fix` set, promoting the finding
+    /// from observable to actionable.
+    pub fn with_fix(mut self, fix: FixAction) -> Self {
+        self.fix = Some(fix);
         self
     }
 }
@@ -174,8 +217,9 @@ impl Finding {
 /// - `skipped` records analyses that could not run and why (offline mode,
 ///   missing lockfile, unreachable registry), so that absence of findings
 ///   is never ambiguous with absence of analysis.
-/// - `suppressed` counts findings removed by `[[ignore]]` rules; it
-///   defaults to zero when the field is absent from the serialized form.
+/// - `suppressed` counts findings removed by `[[ignore]]` rules or the
+///   baseline; it defaults to zero when the field is absent from the
+///   serialized form.
 #[derive(Debug, Default, Serialize, Deserialize)]
 pub struct Report {
     pub findings: Vec<Finding>,

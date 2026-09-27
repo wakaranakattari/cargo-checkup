@@ -16,14 +16,15 @@
 //! the registry grows), which is precisely the class of defect a CI gate
 //! must catch.
 //!
-//! Repairability. The two absence rules name the exact field to set;
-//! edition and wildcard findings are manual: changing the
+//! Repairability. The two absence rules carry `SetManifestField` actions
+//! whose values resolve from `[fix]`/`[msrv]` policy at apply time (see the
+//! fix subsystem). Edition and wildcard findings are manual: changing the
 //! edition requires source-level edits, and choosing a requirement range
 //! is a semantic decision no tool may take unilaterally.
 
 use cargo_metadata::Metadata;
 
-use crate::model::{CheckKind, Finding, Severity};
+use crate::model::{CheckKind, Finding, FixAction, Severity};
 
 /// Projects a package descriptor onto its owning manifest path as a string.
 /// Centralizes the `Utf8PathBuf -> &str -> String` conversion so that every
@@ -62,7 +63,11 @@ pub fn check_hygiene(metadata: &Metadata) -> Vec<Finding> {
                     pkg.name.to_string(),
                     "missing `license` (or `license-file`) in [package]".to_string(),
                 )
-                .with_hint("set `license = \"MIT OR Apache-2.0\"` for crates.io or run with --fix"),
+                .with_hint("set `license = \"MIT OR Apache-2.0\"` for crates.io or run with --fix")
+                .with_fix(FixAction::SetManifestField {
+                    manifest: manifest.clone(),
+                    field: "license".to_string(),
+                }),
             );
         }
         // Rule H2 (metadata completeness, toolchain floor): a responsible
@@ -76,7 +81,11 @@ pub fn check_hygiene(metadata: &Metadata) -> Vec<Finding> {
                     pkg.name.to_string(),
                     "missing `rust-version` (MSRV) in [package]".to_string(),
                 )
-                .with_hint("set `rust-version` or run with --fix (needs [fix] rust_version)"),
+                .with_hint("set `rust-version` or run with --fix (needs [fix] rust_version)")
+                .with_fix(FixAction::SetManifestField {
+                    manifest: manifest.clone(),
+                    field: "rust-version".to_string(),
+                }),
             );
         }
         // Rule H3 (edition modernity): editions 2015 and 2018 predate the
