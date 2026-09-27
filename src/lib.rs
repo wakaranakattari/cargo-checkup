@@ -86,6 +86,11 @@ pub fn scan(opts: &ScanOptions) -> anyhow::Result<Report> {
     if enabled.contains(&CheckKind::Duplicate) {
         report.findings.extend(checks::duplicates::check_duplicates(&metadata, &workspace_root));
     }
+    if enabled.contains(&CheckKind::Advisory) {
+        let (findings, skipped) = checks::advisory::check_advisories(&metadata, opts.offline);
+        report.findings.extend(findings);
+        report.skipped.extend(skipped);
+    }
     if enabled.contains(&CheckKind::Outdated) {
         let (findings, skipped) =
             checks::outdated::check_outdated(&metadata, opts.offline, opts.no_cache, &mut cache);

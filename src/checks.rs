@@ -6,6 +6,7 @@
 //! guarantees that global concerns (check selection, ordering) apply
 //! uniformly to every analysis.
 
+pub mod advisory;
 pub mod duplicates;
 pub mod hygiene;
 pub mod outdated;
