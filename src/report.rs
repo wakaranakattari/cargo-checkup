@@ -64,7 +64,7 @@ pub fn render_human(report: &Report) -> String {
         out.push_str(&format!("\n{} finding(s)\n", report.findings.len()));
     }
     if report.suppressed > 0 {
-        out.push_str(&format!("{} finding(s) suppressed by checkup.toml\n", report.suppressed));
+        out.push_str(&format!("{} finding(s) suppressed by checkup.toml/baseline\n", report.suppressed));
     }
     if !report.skipped.is_empty() {
         out.push_str("skipped:\n");

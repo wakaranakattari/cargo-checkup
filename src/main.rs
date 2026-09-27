@@ -61,6 +61,12 @@ struct Cli {
     /// Fail only on these checks (comma-separated, default: any warn/error).
     #[arg(long)]
     fail_on: Option<String>,
+    /// Suppress findings recorded in the baseline file.
+    #[arg(long)]
+    baseline: Option<PathBuf>,
+    /// Write current findings as the new baseline file.
+    #[arg(long)]
+    baseline_update: Option<PathBuf>,
     /// Path to checkup.toml policy file (auto-discovered by default).
     #[arg(long)]
     config: Option<PathBuf>,
@@ -120,6 +126,8 @@ fn main() -> ExitCode {
         only,
         skip,
         config_path: cli.config.clone(),
+        baseline: cli.baseline.clone(),
+        baseline_update: cli.baseline_update.clone(),
     };
     let (rep, _cfg) = match scan(&opts) {
         Ok(r) => r,

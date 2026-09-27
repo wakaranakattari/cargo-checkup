@@ -15,6 +15,7 @@
 //! are non-fatal by design and surface as skip notes, so that absence of
 //! findings is never ambiguous with absence of analysis.
 
+pub mod baseline;
 pub mod cache;
 pub mod checks;
 pub mod config;
@@ -41,6 +42,10 @@ pub struct ScanOptions {
     pub strict_unused: bool,
     /// Explicit policy file, i.e. `--config` (absence triggers discovery).
     pub config_path: Option<PathBuf>,
+    /// Baseline for suppression-by-triage, i.e. `--baseline`.
+    pub baseline: Option<PathBuf>,
+    /// Destination for bless-mode baseline writing, i.e. `--baseline-update`.
+    pub baseline_update: Option<PathBuf>,
     /// Restrict execution to these checks, i.e. `--only` (absence runs all).
     pub only: Option<Vec<CheckKind>>,
     /// Exclude these checks from execution, i.e. `--skip`.
@@ -168,6 +173,30 @@ pub fn scan(opts: &ScanOptions) -> anyhow::Result<(Report, CheckupConfig)> {
     let before = report.findings.len();
     report.findings.retain(|f| !finding_ignored(f, &cfg.ignore));
     report.suppressed += before - report.findings.len();
+
+    // Triage-accepted findings. Baseline load failure is fatal
+    // (proceeding without the accepted set would misreport blessed noise
+    // as novel defects).
+    if let Some(path) = &opts.baseline {
+        match baseline::load_baseline(path) {
+            Ok(entries) => {
+                let findings = std::mem::take(&mut report.findings);
+                let (kept, n) = baseline::apply_baseline(findings, &entries);
+                report.findings = kept;
+                report.suppressed += n;
+            }
+            Err(e) => anyhow::bail!("baseline {}: {e:#}", path.display()),
+        }
+    }
+
+    // Bless mode: persist post-ignore findings as the new accepted set and
+    // return an empty finding list, so the invocation reports the blessing
+    // itself rather than the blessed findings.
+    if let Some(path) = &opts.baseline_update {
+        let n = baseline::write_baseline(path, &report.findings)?;
+        report.findings.clear();
+        report.skipped.push(format!("wrote {n} baseline entries to {}", path.display()));
+    }
 
     // Stable output for CI diffs.
     report.findings.sort_by(|a, b| {
