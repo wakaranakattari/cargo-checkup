@@ -32,6 +32,8 @@ pub struct ScanOptions {
     pub manifest_path: Option<PathBuf>,
     /// Reserved for network-dependent checks, i.e. `--offline`.
     pub offline: bool,
+    /// Extend unused analysis to optional dependencies, i.e. `--strict-unused`.
+    pub strict_unused: bool,
     /// Restrict execution to these checks, i.e. `--only` (absence runs all).
     pub only: Option<Vec<CheckKind>>,
     /// Exclude these checks from execution, i.e. `--skip`.
@@ -73,7 +75,9 @@ pub fn scan(opts: &ScanOptions) -> anyhow::Result<Report> {
     let mut report = Report::default();
 
     if enabled.contains(&CheckKind::Unused) {
-        report.findings.extend(checks::unused::check_unused(&metadata, false));
+        report
+            .findings
+            .extend(checks::unused::check_unused(&metadata, opts.strict_unused));
     }
     if enabled.contains(&CheckKind::Hygiene) {
         report.findings.extend(checks::hygiene::check_hygiene(&metadata));
