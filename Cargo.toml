@@ -1,0 +1,12 @@
+[package]
+name = "cargo-checkup"
+version = "1.0.0"
+edition = "2024"
+rust-version = "1.85"
+authors = ["wakaranakattari <wakaranakattari@gmail.com>"]
+description = "Unified cargo health check: unused deps, outdated, duplicates, advisories, hygiene - one report, optional --fix"
+repository = "https://github.com/wakaranakattari/cargo-checkup"
+keywords = ["cargo", "audit", "dependencies", "lint", "ci"]
+categories = ["development-tools"]
+
+[dependencies]
