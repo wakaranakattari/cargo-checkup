@@ -189,6 +189,16 @@ impl Report {
             .any(|f| matches!(f.severity, Severity::Warn | Severity::Error))
     }
 
+    /// Restricted gate predicate for `--fail-on`: the default predicate
+    /// applied to the subset of findings whose check belongs to `kinds`.
+    /// An empty `kinds` set fails nothing, which is the correct vacuous
+    /// reading of "fail on none of these".
+    pub fn has_failures_in(&self, kinds: &[CheckKind]) -> bool {
+        self.findings.iter().any(|f| {
+            kinds.contains(&f.check) && matches!(f.severity, Severity::Warn | Severity::Error)
+        })
+    }
+
     /// Cardinality of findings of one check. Used by tests and by future
     /// summary renderers; linear in the finding count.
     pub fn count_by_check(&self, kind: CheckKind) -> usize {

@@ -58,6 +58,9 @@ struct Cli {
     /// Skip these checks (comma-separated).
     #[arg(long)]
     skip: Option<String>,
+    /// Fail only on these checks (comma-separated, default: any warn/error).
+    #[arg(long)]
+    fail_on: Option<String>,
     /// Path to checkup.toml policy file (auto-discovered by default).
     #[arg(long)]
     config: Option<PathBuf>,
@@ -105,6 +108,9 @@ fn main() -> ExitCode {
     let Ok(skip) = parse_kinds(&cli.skip, "skip") else {
         return ExitCode::from(2);
     };
+    let Ok(fail_on) = parse_kinds(&cli.fail_on, "fail-on") else {
+        return ExitCode::from(2);
+    };
 
     let opts = ScanOptions {
         manifest_path: cli.manifest_path.clone(),
@@ -115,7 +121,7 @@ fn main() -> ExitCode {
         skip,
         config_path: cli.config.clone(),
     };
-    let rep = match scan(&opts) {
+    let (rep, _cfg) = match scan(&opts) {
         Ok(r) => r,
         Err(e) => {
             eprintln!("error: failed to run checkup: {e:#}");
@@ -127,12 +133,17 @@ fn main() -> ExitCode {
         Format::Human => print!("{}", report::render_human(&rep)),
         Format::Json => println!("{}", report::render_json(&rep)),
     }
-    exit_for(&rep)
+    exit_for(&rep, fail_on.as_deref())
 }
 
-/// Evaluates the default gate predicate over the report. The mapping onto
-/// exit codes is bijective: failure becomes 1, passage becomes 0, and no
-/// other code originates here.
-fn exit_for(rep: &cargo_checkup::Report) -> ExitCode {
-    if rep.has_failures() { ExitCode::from(1) } else { ExitCode::from(0) }
+/// Evaluates the gate predicate: the restricted predicate over `fail_on`
+/// when the flag is present, the default predicate otherwise. The mapping
+/// onto exit codes is bijective with the algebra: failure becomes 1,
+/// passage becomes 0, and no other code originates here.
+fn exit_for(rep: &cargo_checkup::Report, fail_on: Option<&[CheckKind]>) -> ExitCode {
+    let failed = match fail_on {
+        Some(kinds) => rep.has_failures_in(kinds),
+        None => rep.has_failures(),
+    };
+    if failed { ExitCode::from(1) } else { ExitCode::from(0) }
 }

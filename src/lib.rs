@@ -47,10 +47,10 @@ pub struct ScanOptions {
     pub skip: Option<Vec<CheckKind>>,
 }
 
-/// Runs all enabled checks and returns the canonical report.
-/// Postcondition: findings are canonically ordered; every
-/// executed-but-degraded check contributed its cause to `skipped`.
-pub fn scan(opts: &ScanOptions) -> anyhow::Result<Report> {
+/// Runs all enabled checks and returns the canonical report together with
+/// the loaded policy. Postconditions: findings are canonically ordered;
+/// every executed-but-degraded check contributed its cause to `skipped`.
+pub fn scan(opts: &ScanOptions) -> anyhow::Result<(Report, CheckupConfig)> {
     let mut cmd = cargo_metadata::MetadataCommand::new();
     if let Some(manifest) = &opts.manifest_path {
         cmd.manifest_path(manifest);
@@ -82,8 +82,6 @@ pub fn scan(opts: &ScanOptions) -> anyhow::Result<Report> {
             skipped_notes.push(format!("ignore rule with unknown check `{}`", rule.check));
         }
     }
-    let _ = cfg;
-
     // Check selection: `--only` is a whitelist, `--skip` a blacklist,
     // absence of both is the full taxonomy. `--only` dominates `--skip`
     // when both are given (a check must be listed to run at all).
@@ -113,6 +111,11 @@ pub fn scan(opts: &ScanOptions) -> anyhow::Result<Report> {
     if enabled.contains(&CheckKind::Hygiene) {
         report.findings.extend(checks::hygiene::check_hygiene(&metadata));
     }
+    if enabled.contains(&CheckKind::License) || enabled.contains(&CheckKind::Banned) {
+        let mut policy = checks::policy::check_policy(&metadata, &cfg);
+        policy.retain(|f| enabled.contains(&f.check));
+        report.findings.extend(policy);
+    }
     if enabled.contains(&CheckKind::Duplicate) {
         report.findings.extend(checks::duplicates::check_duplicates(&metadata, &workspace_root));
     }
@@ -134,5 +137,5 @@ pub fn scan(opts: &ScanOptions) -> anyhow::Result<Report> {
         (a.check.as_str(), &a.package, &a.detail).cmp(&(b.check.as_str(), &b.package, &b.detail))
     });
     report.skipped.extend(skipped_notes);
-    Ok(report)
+    Ok((report, cfg))
 }

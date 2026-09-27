@@ -10,4 +10,5 @@ pub mod advisory;
 pub mod duplicates;
 pub mod hygiene;
 pub mod outdated;
+pub mod policy;
 pub mod unused;
