@@ -47,6 +47,37 @@ pub struct ScanOptions {
     pub skip: Option<Vec<CheckKind>>,
 }
 
+/// Conjunctive ignore predicate over one finding and the policy rule set.
+/// A rule matches iff its check equals the finding's canonical check name
+/// and every specified optional field matches (package by subject equality,
+/// dep by `dep_name` equality, detail fragment by substring containment).
+/// Omitted fields are unconstrained. The predicate is monotone in rule
+/// specificity: adding constraints can only narrow the match set, never
+/// widen it, so rules compose safely.
+fn finding_ignored(f: &Finding, rules: &[config::IgnoreRule]) -> bool {
+    rules.iter().any(|r| {
+        if r.check.to_lowercase() != f.check.as_str() {
+            return false;
+        }
+        if let Some(p) = &r.package {
+            if p != &f.package {
+                return false;
+            }
+        }
+        if let Some(d) = &r.dep {
+            if f.dep_name.as_deref() != Some(d.as_str()) {
+                return false;
+            }
+        }
+        if let Some(sub) = &r.detail_contains {
+            if !f.detail.contains(sub) {
+                return false;
+            }
+        }
+        true
+    })
+}
+
 /// Runs all enabled checks and returns the canonical report together with
 /// the loaded policy. Postconditions: findings are canonically ordered;
 /// every executed-but-degraded check contributed its cause to `skipped`.
@@ -131,6 +162,12 @@ pub fn scan(opts: &ScanOptions) -> anyhow::Result<(Report, CheckupConfig)> {
         report.skipped.extend(skipped);
     }
     cache.save();
+
+    // Repository-declared exceptions. The suppressed count is
+    // exact: pre-filter cardinality minus post-filter cardinality.
+    let before = report.findings.len();
+    report.findings.retain(|f| !finding_ignored(f, &cfg.ignore));
+    report.suppressed += before - report.findings.len();
 
     // Stable output for CI diffs.
     report.findings.sort_by(|a, b| {

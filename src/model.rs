@@ -174,10 +174,14 @@ impl Finding {
 /// - `skipped` records analyses that could not run and why (offline mode,
 ///   missing lockfile, unreachable registry), so that absence of findings
 ///   is never ambiguous with absence of analysis.
+/// - `suppressed` counts findings removed by `[[ignore]]` rules; it
+///   defaults to zero when the field is absent from the serialized form.
 #[derive(Debug, Default, Serialize, Deserialize)]
 pub struct Report {
     pub findings: Vec<Finding>,
     pub skipped: Vec<String>,
+    #[serde(default)]
+    pub suppressed: usize,
 }
 
 impl Report {
