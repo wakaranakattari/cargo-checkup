@@ -46,6 +46,9 @@ struct Cli {
     /// Skip network checks (outdated, advisory).
     #[arg(long)]
     offline: bool,
+    /// Ignore the disk cache for crates.io lookups.
+    #[arg(long)]
+    no_cache: bool,
     /// Also flag optional dependencies that look unused.
     #[arg(long)]
     strict_unused: bool,
@@ -103,6 +106,7 @@ fn main() -> ExitCode {
     let opts = ScanOptions {
         manifest_path: cli.manifest_path.clone(),
         offline: cli.offline,
+        no_cache: cli.no_cache,
         strict_unused: cli.strict_unused,
         only,
         skip,

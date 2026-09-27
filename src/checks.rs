@@ -8,4 +8,5 @@
 
 pub mod duplicates;
 pub mod hygiene;
+pub mod outdated;
 pub mod unused;

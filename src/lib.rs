@@ -33,6 +33,8 @@ pub struct ScanOptions {
     pub manifest_path: Option<PathBuf>,
     /// Reserved for network-dependent checks, i.e. `--offline`.
     pub offline: bool,
+    /// Bypass the crates.io disk cache, i.e. `--no-cache`.
+    pub no_cache: bool,
     /// Extend unused analysis to optional dependencies, i.e. `--strict-unused`.
     pub strict_unused: bool,
     /// Restrict execution to these checks, i.e. `--only` (absence runs all).
@@ -69,11 +71,9 @@ pub fn scan(opts: &ScanOptions) -> anyhow::Result<Report> {
         })
         .collect();
 
-    // Independent analyses over shared immutable metadata. Checks whose
-    // modules arrive later (network, policy) are simply never enabled yet:
-    // membership in `enabled` without an executor contributes nothing,
-    // which keeps selection total over the taxonomy at every stage.
+    // Independent analyses over shared immutable metadata.
     let mut report = Report::default();
+    let mut cache = cache::CratesCache::load(opts.no_cache || opts.offline);
 
     if enabled.contains(&CheckKind::Unused) {
         report
@@ -86,6 +86,13 @@ pub fn scan(opts: &ScanOptions) -> anyhow::Result<Report> {
     if enabled.contains(&CheckKind::Duplicate) {
         report.findings.extend(checks::duplicates::check_duplicates(&metadata, &workspace_root));
     }
+    if enabled.contains(&CheckKind::Outdated) {
+        let (findings, skipped) =
+            checks::outdated::check_outdated(&metadata, opts.offline, opts.no_cache, &mut cache);
+        report.findings.extend(findings);
+        report.skipped.extend(skipped);
+    }
+    cache.save();
 
     // Stable output for CI diffs.
     report.findings.sort_by(|a, b| {
