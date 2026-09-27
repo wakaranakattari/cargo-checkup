@@ -1,0 +1,77 @@
+.TH CARGO-CHECKUP 1 "2026-09-27" "cargo-checkup 1.0" "User Commands"
+.SH NAME
+cargo-checkup \- unified cargo health check for Rust workspaces
+.SH SYNOPSIS
+.B cargo checkup
+[\fIOPTIONS\fR]
+.br
+.B cargo-checkup init
+[\fB\-\-force\fR]
+.br
+.B cargo-checkup completions
+\fISHELL\fR
+.SH DESCRIPTION
+Runs unused, outdated, duplicate, advisory, license, banned and hygiene
+checks over a Cargo workspace in one pass, prints a unified report and
+optionally applies fixes.
+Exit code 1 when a warn/error finding exists (or matches \fB\-\-fail\-on\fR),
+0 when clean or info-only, 2 on tool errors.
+.SH OPTIONS
+.TP
+\fB\-\-manifest\-path\fR \fIPATH\fR
+Path to Cargo.toml (defaults to current dir).
+.TP
+\fB\-\-format\fR \fIhuman|json|sarif\fR
+Output format (default: human). sarif fits GitHub code scanning.
+.TP
+\fB\-\-offline\fR
+Skip network checks (outdated, advisory).
+.TP
+\fB\-\-no\-cache\fR
+Ignore the disk cache for crates.io lookups.
+.TP
+\fB\-\-strict\-unused\fR
+Also flag optional dependencies that look unused.
+.TP
+\fB\-\-fix\fR
+Apply all auto-fixes and exit 0 on success.
+.TP
+\fB\-\-check\fR
+Print what \fB\-\-fix\fR would do without changing anything.
+.TP
+\fB\-\-only\fR \fILIST\fR
+Only run these checks (comma-separated).
+.TP
+\fB\-\-skip\fR \fILIST\fR
+Skip these checks (comma-separated).
+.TP
+\fB\-\-fail\-on\fR \fILIST\fR
+Fail only on these checks (comma-separated).
+.TP
+\fB\-\-config\fR \fIPATH\fR
+Path to checkup.toml policy file (auto-discovered by default).
+.TP
+\fB\-\-baseline\fR \fIPATH\fR
+Suppress findings recorded in the baseline file.
+.TP
+\fB\-\-baseline\-update\fR \fIPATH\fR
+Write current findings as the new baseline file.
+.SH FILES
+.TP
+\fIcheckup.toml\fR
+Policy file in the workspace root: [licenses], [banned], [msrv], [fix],
+[[ignore]] rules.
+.SH EXAMPLES
+cargo checkup --offline
+.br
+cargo checkup --format sarif > results.sarif
+.br
+cargo checkup --baseline-update .checkup-baseline.json
+.br
+cargo checkup --fix
+.SH "SEE ALSO"
+cargo(1)
+.SH AUTHOR
+wakaranakattari <wakaranakattari@gmail.com>
+.br
+Source and bug reports: https://github.com/wakaranakattari/cargo-checkup

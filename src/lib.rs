@@ -1,19 +1,29 @@
-//! Scan orchestrator: from CLI options to an ordered report.
+//! Scan orchestrator: from CLI options to a suppressed, ordered report.
 //!
-//! Pipeline architecture. A scan is the sequential composition of three
+//! Pipeline architecture. A scan is the sequential composition of six
 //! stages, each with a single responsibility:
 //! 1. Metadata acquisition: one `cargo metadata` invocation materializes
 //!    the workspace graph (packages, resolve nodes, manifests).
-//! 2. Analysis: every enabled check executes over the metadata, each
-//!    contributing findings independently (checks share no mutable state,
-//!    so their relative order is semantically irrelevant).
-//! 3. Canonicalization: findings are sorted by (check, package, detail),
+//! 2. Policy resolution: the `checkup.toml` file is discovered and parsed,
+//!    or the empty default policy is adopted; ignore rules are validated.
+//! 3. Analysis: every enabled check executes over the metadata, each
+//!    contributing findings and skip notes independently (checks share no
+//!    mutable state, so their relative order is semantically irrelevant).
+//! 4. Cache persistence: the crates.io memoization table is flushed once,
+//!    after all readers have run.
+//! 5. Suppression: `[[ignore]]` rules filter first (repository-declared
+//!    exceptions), then the baseline filters (triage-accepted findings).
+//!    The order matters: the baseline blesses post-ignore findings, so
+//!    removing an ignore rule correctly resurrects the finding rather than
+//!    hiding it behind a stale blessing.
+//! 6. Canonicalization: findings are sorted by (check, package, detail),
 //!    making every report diff-stable across runs and machines.
 //!
-//! Error doctrine. Metadata failure is fatal (a report computed from
-//! partial inputs would be a false certificate). Per-check degradations
-//! are non-fatal by design and surface as skip notes, so that absence of
-//! findings is never ambiguous with absence of analysis.
+//! Error doctrine. Metadata failure, unreadable policy, and unreadable
+//! baseline are fatal (a report computed from partial inputs would be a
+//! false certificate). Per-check degradations (offline mode, unreachable
+//! registry) are non-fatal by design and surface as skip notes, so that
+//! absence of findings is never ambiguous with absence of analysis.
 
 pub mod baseline;
 pub mod cache;
@@ -30,27 +40,29 @@ pub use config::CheckupConfig;
 pub use model::{CheckKind, Finding, FixAction, Report, Severity};
 
 /// The complete parameterization of one scan, mirroring the CLI surface.
-/// Each field maps to exactly one flag; `None` denotes the flag's absence
-/// (defaults apply), never an error.
+/// Each field maps to exactly one flag or subcommand-less option; `None`
+/// denotes the flag's absence (defaults apply), never an error. The struct
+/// is consumed by value semantics at use sites but held by reference here,
+/// since a scan borrows its options for its entire duration.
 pub struct ScanOptions {
     /// Manifest anchoring the `cargo metadata` invocation, i.e. `--manifest-path`.
     pub manifest_path: Option<PathBuf>,
-    /// Reserved for network-dependent checks, i.e. `--offline`.
+    /// Skip the network-dependent checks, i.e. `--offline`.
     pub offline: bool,
     /// Bypass the crates.io disk cache, i.e. `--no-cache`.
     pub no_cache: bool,
     /// Extend unused analysis to optional dependencies, i.e. `--strict-unused`.
     pub strict_unused: bool,
+    /// Restrict execution to these checks, i.e. `--only` (absence runs all).
+    pub only: Option<Vec<CheckKind>>,
+    /// Exclude these checks from execution, i.e. `--skip`.
+    pub skip: Option<Vec<CheckKind>>,
     /// Explicit policy file, i.e. `--config` (absence triggers discovery).
     pub config_path: Option<PathBuf>,
     /// Baseline for suppression-by-triage, i.e. `--baseline`.
     pub baseline: Option<PathBuf>,
     /// Destination for bless-mode baseline writing, i.e. `--baseline-update`.
     pub baseline_update: Option<PathBuf>,
-    /// Restrict execution to these checks, i.e. `--only` (absence runs all).
-    pub only: Option<Vec<CheckKind>>,
-    /// Exclude these checks from execution, i.e. `--skip`.
-    pub skip: Option<Vec<CheckKind>>,
 }
 
 /// Conjunctive ignore predicate over one finding and the policy rule set.
@@ -84,9 +96,15 @@ fn finding_ignored(f: &Finding, rules: &[config::IgnoreRule]) -> bool {
     })
 }
 
-/// Runs all enabled checks and returns the canonical report together with
-/// the loaded policy. Postconditions: findings are canonically ordered;
+/// Executes the six-stage pipeline and returns the canonical report together
+/// with the loaded policy (which `--fix` requires for value resolution).
+/// Postconditions: findings are canonically ordered; `suppressed` equals the
+/// exact number of findings removed by ignore rules and baseline combined;
 /// every executed-but-degraded check contributed its cause to `skipped`.
+/// In bless mode (`baseline_update` set), the post-ignore findings are
+/// written as the new baseline and the returned report carries zero
+/// findings with the write recorded under `skipped:`, so the invocation
+/// both records and reports success in one artifact.
 pub fn scan(opts: &ScanOptions) -> anyhow::Result<(Report, CheckupConfig)> {
     let mut cmd = cargo_metadata::MetadataCommand::new();
     if let Some(manifest) = &opts.manifest_path {
@@ -94,11 +112,14 @@ pub fn scan(opts: &ScanOptions) -> anyhow::Result<(Report, CheckupConfig)> {
     }
     let metadata = cmd.exec()?;
     let workspace_root = metadata.workspace_root.as_std_path().to_path_buf();
-    let manifest_dir = opts.manifest_path.as_ref().and_then(|p| p.parent().map(|p| p.to_path_buf()));
+    let manifest_dir = opts
+        .manifest_path
+        .as_ref()
+        .and_then(|p| p.parent().map(|p| p.to_path_buf()));
 
-    // Policy resolution: explicit path wins, else auto-discovered
-    // checkup.toml, else the empty default policy. Validation notes unknown
-    // check names in rules so typos stay visible without vetoing the scan.
+    // Stage 2: policy resolution with early rule validation. Unknown check
+    // names in rules are reported, not fatal: a typo must be visible, but
+    // must not veto an otherwise valid scan.
     let mut skipped_notes: Vec<String> = Vec::new();
     let cfg_path = match &opts.config_path {
         Some(p) => {
@@ -119,6 +140,7 @@ pub fn scan(opts: &ScanOptions) -> anyhow::Result<(Report, CheckupConfig)> {
             skipped_notes.push(format!("ignore rule with unknown check `{}`", rule.check));
         }
     }
+
     // Check selection: `--only` is a whitelist, `--skip` a blacklist,
     // absence of both is the full taxonomy. `--only` dominates `--skip`
     // when both are given (a check must be listed to run at all).
@@ -136,7 +158,7 @@ pub fn scan(opts: &ScanOptions) -> anyhow::Result<(Report, CheckupConfig)> {
         })
         .collect();
 
-    // Independent analyses over shared immutable metadata.
+    // Stage 3: independent analyses over shared immutable metadata.
     let mut report = Report::default();
     let mut cache = cache::CratesCache::load(opts.no_cache || opts.offline);
 
@@ -146,7 +168,9 @@ pub fn scan(opts: &ScanOptions) -> anyhow::Result<(Report, CheckupConfig)> {
             .extend(checks::unused::check_unused(&metadata, opts.strict_unused));
     }
     if enabled.contains(&CheckKind::Hygiene) {
-        report.findings.extend(checks::hygiene::check_hygiene(&metadata));
+        report
+            .findings
+            .extend(checks::hygiene::check_hygiene(&metadata));
     }
     if enabled.contains(&CheckKind::License) || enabled.contains(&CheckKind::Banned) {
         let mut policy = checks::policy::check_policy(&metadata, &cfg);
@@ -154,12 +178,10 @@ pub fn scan(opts: &ScanOptions) -> anyhow::Result<(Report, CheckupConfig)> {
         report.findings.extend(policy);
     }
     if enabled.contains(&CheckKind::Duplicate) {
-        report.findings.extend(checks::duplicates::check_duplicates(&metadata, &workspace_root));
-    }
-    if enabled.contains(&CheckKind::Advisory) {
-        let (findings, skipped) = checks::advisory::check_advisories(&metadata, opts.offline);
-        report.findings.extend(findings);
-        report.skipped.extend(skipped);
+        report.findings.extend(checks::duplicates::check_duplicates(
+            &metadata,
+            &workspace_root,
+        ));
     }
     if enabled.contains(&CheckKind::Outdated) {
         let (findings, skipped) =
@@ -167,15 +189,21 @@ pub fn scan(opts: &ScanOptions) -> anyhow::Result<(Report, CheckupConfig)> {
         report.findings.extend(findings);
         report.skipped.extend(skipped);
     }
+    if enabled.contains(&CheckKind::Advisory) {
+        let (findings, skipped) = checks::advisory::check_advisories(&metadata, opts.offline);
+        report.findings.extend(findings);
+        report.skipped.extend(skipped);
+    }
+    // Stage 4: single cache flush after all readers completed.
     cache.save();
 
-    // Repository-declared exceptions. The suppressed count is
+    // Stage 5a: repository-declared exceptions. The suppressed count is
     // exact: pre-filter cardinality minus post-filter cardinality.
     let before = report.findings.len();
     report.findings.retain(|f| !finding_ignored(f, &cfg.ignore));
     report.suppressed += before - report.findings.len();
 
-    // Triage-accepted findings. Baseline load failure is fatal
+    // Stage 5b: triage-accepted findings. Baseline load failure is fatal
     // (proceeding without the accepted set would misreport blessed noise
     // as novel defects).
     if let Some(path) = &opts.baseline {
@@ -196,10 +224,12 @@ pub fn scan(opts: &ScanOptions) -> anyhow::Result<(Report, CheckupConfig)> {
     if let Some(path) = &opts.baseline_update {
         let n = baseline::write_baseline(path, &report.findings)?;
         report.findings.clear();
-        report.skipped.push(format!("wrote {n} baseline entries to {}", path.display()));
+        report
+            .skipped
+            .push(format!("wrote {n} baseline entries to {}", path.display()));
     }
 
-    // Stable output for CI diffs.
+    // Stage 6: canonical order for CI diff-stability.
     report.findings.sort_by(|a, b| {
         (a.check.as_str(), &a.package, &a.detail).cmp(&(b.check.as_str(), &b.package, &b.detail))
     });
