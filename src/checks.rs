@@ -7,4 +7,5 @@
 //! uniformly to every analysis.
 
 pub mod duplicates;
+pub mod hygiene;
 pub mod unused;
