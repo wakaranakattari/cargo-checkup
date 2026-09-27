@@ -15,6 +15,7 @@
 //! are non-fatal by design and surface as skip notes, so that absence of
 //! findings is never ambiguous with absence of analysis.
 
+pub mod cache;
 pub mod checks;
 pub mod model;
 pub mod report;
