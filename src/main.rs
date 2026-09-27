@@ -30,6 +30,7 @@ use clap::{Parser, ValueEnum};
 enum Format {
     Human,
     Json,
+    Sarif,
 }
 
 /// Unified cargo health check: unused, outdated, duplicates, advisories,
@@ -140,6 +141,7 @@ fn main() -> ExitCode {
     match cli.format {
         Format::Human => print!("{}", report::render_human(&rep)),
         Format::Json => println!("{}", report::render_json(&rep)),
+        Format::Sarif => println!("{}", report::render_sarif(&rep)),
     }
     exit_for(&rep, fail_on.as_deref())
 }
