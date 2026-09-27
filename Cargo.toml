@@ -5,6 +5,7 @@ edition = "2024"
 rust-version = "1.85"
 authors = ["wakaranakattari <wakaranakattari@gmail.com>"]
 description = "Unified cargo health check: unused deps, outdated, duplicates, advisories, hygiene - one report, optional --fix"
+license = "MIT"
 repository = "https://github.com/wakaranakattari/cargo-checkup"
 keywords = ["cargo", "audit", "dependencies", "lint", "ci"]
 categories = ["development-tools"]
