@@ -58,6 +58,9 @@ struct Cli {
     /// Skip these checks (comma-separated).
     #[arg(long)]
     skip: Option<String>,
+    /// Path to checkup.toml policy file (auto-discovered by default).
+    #[arg(long)]
+    config: Option<PathBuf>,
 }
 
 fn cargo_subcommand_args() -> Vec<String> {
@@ -110,6 +113,7 @@ fn main() -> ExitCode {
         strict_unused: cli.strict_unused,
         only,
         skip,
+        config_path: cli.config.clone(),
     };
     let rep = match scan(&opts) {
         Ok(r) => r,

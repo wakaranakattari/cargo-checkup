@@ -17,12 +17,14 @@
 
 pub mod cache;
 pub mod checks;
+pub mod config;
 pub mod model;
 pub mod report;
 
 use std::collections::HashSet;
 use std::path::PathBuf;
 
+pub use config::CheckupConfig;
 pub use model::{CheckKind, Finding, Report, Severity};
 
 /// The complete parameterization of one scan, mirroring the CLI surface.
@@ -37,6 +39,8 @@ pub struct ScanOptions {
     pub no_cache: bool,
     /// Extend unused analysis to optional dependencies, i.e. `--strict-unused`.
     pub strict_unused: bool,
+    /// Explicit policy file, i.e. `--config` (absence triggers discovery).
+    pub config_path: Option<PathBuf>,
     /// Restrict execution to these checks, i.e. `--only` (absence runs all).
     pub only: Option<Vec<CheckKind>>,
     /// Exclude these checks from execution, i.e. `--skip`.
@@ -53,6 +57,32 @@ pub fn scan(opts: &ScanOptions) -> anyhow::Result<Report> {
     }
     let metadata = cmd.exec()?;
     let workspace_root = metadata.workspace_root.as_std_path().to_path_buf();
+    let manifest_dir = opts.manifest_path.as_ref().and_then(|p| p.parent().map(|p| p.to_path_buf()));
+
+    // Policy resolution: explicit path wins, else auto-discovered
+    // checkup.toml, else the empty default policy. Validation notes unknown
+    // check names in rules so typos stay visible without vetoing the scan.
+    let mut skipped_notes: Vec<String> = Vec::new();
+    let cfg_path = match &opts.config_path {
+        Some(p) => {
+            if !p.exists() {
+                anyhow::bail!("config file not found: {}", p.display());
+            }
+            Some(p.clone())
+        }
+        None => CheckupConfig::discover(None, &workspace_root, manifest_dir.as_deref()),
+    };
+    let cfg = match &cfg_path {
+        Some(p) => CheckupConfig::load(p)?,
+        None => CheckupConfig::default(),
+    };
+    // Validate ignore rules early so typos don't silently do nothing.
+    for rule in &cfg.ignore {
+        if CheckKind::parse_list(&rule.check).is_err() {
+            skipped_notes.push(format!("ignore rule with unknown check `{}`", rule.check));
+        }
+    }
+    let _ = cfg;
 
     // Check selection: `--only` is a whitelist, `--skip` a blacklist,
     // absence of both is the full taxonomy. `--only` dominates `--skip`
@@ -103,5 +133,6 @@ pub fn scan(opts: &ScanOptions) -> anyhow::Result<Report> {
     report.findings.sort_by(|a, b| {
         (a.check.as_str(), &a.package, &a.detail).cmp(&(b.check.as_str(), &b.package, &b.detail))
     });
+    report.skipped.extend(skipped_notes);
     Ok(report)
 }
