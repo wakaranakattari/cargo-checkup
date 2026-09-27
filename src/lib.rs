@@ -27,7 +27,7 @@ use std::collections::HashSet;
 use std::path::PathBuf;
 
 pub use config::CheckupConfig;
-pub use model::{CheckKind, Finding, Report, Severity};
+pub use model::{CheckKind, Finding, FixAction, Report, Severity};
 
 /// The complete parameterization of one scan, mirroring the CLI surface.
 /// Each field maps to exactly one flag; `None` denotes the flag's absence
@@ -205,4 +205,33 @@ pub fn scan(opts: &ScanOptions) -> anyhow::Result<(Report, CheckupConfig)> {
     });
     report.skipped.extend(skipped_notes);
     Ok((report, cfg))
+}
+
+/// Implements `cargo checkup init`: materializes a starter `checkup.toml` in
+/// the workspace root. Refuses to overwrite an existing file unless `force`
+/// is set, since silent overwrite would destroy curated policy. The template
+/// is pre-filled with the distinct license strings of the current lockfile
+/// (see `config::init_template`), encoding the status quo as the initial
+/// policy. Returns the written path on success.
+pub fn init_config(manifest_path: Option<&PathBuf>, force: bool) -> anyhow::Result<PathBuf> {
+    let mut cmd = cargo_metadata::MetadataCommand::new();
+    if let Some(manifest) = manifest_path {
+        cmd.manifest_path(manifest);
+    }
+    let metadata = cmd.exec()?;
+    let workspace_root = metadata.workspace_root.as_std_path().to_path_buf();
+    let path = workspace_root.join("checkup.toml");
+    if path.exists() && !force {
+        anyhow::bail!("{} exists (use --force to overwrite)", path.display());
+    }
+    let mut licenses: Vec<String> = metadata
+        .packages
+        .iter()
+        .filter(|p| !metadata.workspace_members.contains(&p.id))
+        .filter_map(|p| p.license.clone())
+        .collect();
+    licenses.sort();
+    licenses.dedup();
+    std::fs::write(&path, config::init_template(&licenses))?;
+    Ok(path)
 }

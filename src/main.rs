@@ -1,4 +1,4 @@
-//! Command-line boundary: argument grammar and exit-code algebra.
+//! Command-line boundary: argument grammar, subcommands, exit-code algebra.
 //!
 //! Invocation model. The binary serves two call shapes: direct
 //! (`cargo-checkup [FLAGS]`) and cargo-subcommand (`cargo checkup [FLAGS]`),
@@ -8,26 +8,34 @@
 //! `checkup` is stripped, so a user flag or value coincidentally spelling
 //! `checkup` elsewhere is never disturbed.
 //!
+//! Command structure. The default (subcommand-less) invocation runs a scan
+//! and renders the report. Two subcommands provide auxiliary operations that
+//! are not scans: `init` materializes starter policy, `completions` emits
+//! shell integration scripts. Scan flags are global so that they parse in
+//! every position; subcommand invocations ignore them.
+//!
 //! Exit-code algebra. The process terminates with exactly one of:
 //! - 0: the report is clean or info-only; a requested `--fix` applied
-//!   without errors;
-//! - 1: a gate-relevant finding exists (any Warn/Error); `--check`
+//!   without errors; an auxiliary subcommand succeeded;
+//! - 1: a gate-relevant finding exists (default gate: any Warn/Error;
+//!   `--fail-on` gate: Warn/Error within the listed checks); `--check`
 //!   preserves this semantics because it changes nothing;
 //! - 2: the tool itself failed (unparseable flags or check lists,
-//!   metadata I/O errors, failed fix actions).
+//!   metadata/config/baseline I/O errors, failed fix actions).
 //!
 //! The algebra is total: every control path returns one of the three codes.
 
 use std::path::PathBuf;
 use std::process::ExitCode;
 
-use cargo_checkup::{fix, report, scan, CheckKind, ScanOptions};
-use clap::{Parser, ValueEnum};
+use cargo_checkup::{CheckKind, ScanOptions, fix, init_config, report, scan};
+use clap::{CommandFactory, Parser, Subcommand, ValueEnum};
+use clap_complete::Shell;
 
-/// Report projection selector. The two variants correspond bijectively to
-/// the renderers of the report module: terminal review and archival
-/// interchange (JSON). The default is the human projection, matching
-/// interactive use as the common case.
+/// Report projection selector. The three variants correspond bijectively to
+/// the renderers of the report module: terminal review, archival interchange
+/// (JSON), and code-scanning ingestion (SARIF). The default is the human
+/// projection, matching interactive use as the common case.
 #[derive(Debug, Clone, Copy, ValueEnum)]
 enum Format {
     Human,
@@ -35,50 +43,71 @@ enum Format {
     Sarif,
 }
 
+/// Auxiliary operations. Each variant is a closed, non-scan command with its
+/// own outcome contract (success message on stdout, exit 0; diagnostic on
+/// stderr, exit 2 on failure).
+#[derive(Debug, Subcommand)]
+enum Command {
+    /// Write a starter checkup.toml in the workspace root.
+    Init {
+        /// Overwrite an existing checkup.toml.
+        #[arg(long)]
+        force: bool,
+    },
+    /// Print shell completions.
+    Completions {
+        #[arg(value_enum)]
+        shell: Shell,
+    },
+}
+
 /// Unified cargo health check: unused, outdated, duplicates, advisories,
 /// license policy, hygiene - one report, optional --fix.
 #[derive(Debug, Parser)]
 #[command(name = "cargo-checkup", version, about)]
 struct Cli {
+    #[command(subcommand)]
+    command: Option<Command>,
+
     /// Path to Cargo.toml (defaults to current dir).
-    #[arg(long)]
+    #[arg(long, global = true)]
     manifest_path: Option<PathBuf>,
     /// Output format.
-    #[arg(long, value_enum, default_value = "human")]
+    #[arg(long, value_enum, default_value = "human", global = true)]
     format: Format,
     /// Skip network checks (outdated, advisory).
-    #[arg(long)]
+    #[arg(long, global = true)]
     offline: bool,
     /// Ignore the disk cache for crates.io lookups.
-    #[arg(long)]
+    #[arg(long, global = true)]
     no_cache: bool,
     /// Also flag optional dependencies that look unused.
-    #[arg(long)]
+    #[arg(long, global = true)]
     strict_unused: bool,
     /// Apply all auto-fixes (unused removal, manifest fields, cargo update).
-    #[arg(long)]
+    #[arg(long, global = true)]
     fix: bool,
     /// Print what --fix would do without changing anything.
-    #[arg(long)]
+    #[arg(long, global = true)]
     check: bool,
     /// Only run these checks (comma-separated).
-    #[arg(long)]
+    #[arg(long, global = true)]
     only: Option<String>,
     /// Skip these checks (comma-separated).
-    #[arg(long)]
+    #[arg(long, global = true)]
     skip: Option<String>,
     /// Fail only on these checks (comma-separated, default: any warn/error).
-    #[arg(long)]
+    #[arg(long, global = true)]
     fail_on: Option<String>,
+    /// Path to checkup.toml policy file (auto-discovered by default).
+    #[arg(long, global = true)]
+    config: Option<PathBuf>,
     /// Suppress findings recorded in the baseline file.
-    #[arg(long)]
+    #[arg(long, global = true)]
     baseline: Option<PathBuf>,
     /// Write current findings as the new baseline file.
-    #[arg(long)]
+    #[arg(long, global = true)]
     baseline_update: Option<PathBuf>,
-    /// Path to checkup.toml policy file (auto-discovered by default).
-    #[arg(long)]
-    config: Option<PathBuf>,
 }
 
 /// Normalizes the process argument vector into the tool grammar by excising
@@ -113,14 +142,34 @@ fn parse_kinds(s: &Option<String>, flag: &str) -> Result<Option<Vec<CheckKind>>,
     }
 }
 
-/// Main control flow, structured as a decision tree over mode: the scan
-/// runs, then exactly one of the fix pipeline (`--fix`/`--check`) or the
-/// render-and-gate path executes. Every leaf returns a member of the
-/// exit-code algebra documented in the module header; no path falls through
-/// and no path panics on user input (clap owns argument validation, and all
-/// fallible operations below it are `match`ed explicitly).
+/// Main control flow, structured as a decision tree over (subcommand, mode):
+/// auxiliary subcommands execute and return; otherwise the scan runs, then
+/// exactly one of the fix pipeline (`--fix`/`--check`) or the render-and-gate
+/// path executes. Every leaf returns a member of the exit-code algebra
+/// documented in the module header; no path falls through and no path panics
+/// on user input (clap owns argument validation, and all fallible operations
+/// below it are `match`ed explicitly).
 fn main() -> ExitCode {
     let cli = Cli::parse_from(cargo_subcommand_args());
+
+    match cli.command {
+        Some(Command::Init { force }) => match init_config(cli.manifest_path.as_ref(), force) {
+            Ok(path) => {
+                println!("wrote {}", path.display());
+                return ExitCode::from(0);
+            }
+            Err(e) => {
+                eprintln!("error: {e:#}");
+                return ExitCode::from(2);
+            }
+        },
+        Some(Command::Completions { shell }) => {
+            let mut cmd = Cli::command();
+            clap_complete::generate(shell, &mut cmd, "cargo-checkup", &mut std::io::stdout());
+            return ExitCode::from(0);
+        }
+        None => {}
+    }
 
     let Ok(only) = parse_kinds(&cli.only, "only") else {
         return ExitCode::from(2);
