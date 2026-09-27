@@ -9,17 +9,19 @@
 //! `checkup` elsewhere is never disturbed.
 //!
 //! Exit-code algebra. The process terminates with exactly one of:
-//! - 0: the report is clean or info-only;
-//! - 1: a gate-relevant finding exists (any Warn/Error);
+//! - 0: the report is clean or info-only; a requested `--fix` applied
+//!   without errors;
+//! - 1: a gate-relevant finding exists (any Warn/Error); `--check`
+//!   preserves this semantics because it changes nothing;
 //! - 2: the tool itself failed (unparseable flags or check lists,
-//!   metadata I/O errors).
+//!   metadata I/O errors, failed fix actions).
 //!
 //! The algebra is total: every control path returns one of the three codes.
 
 use std::path::PathBuf;
 use std::process::ExitCode;
 
-use cargo_checkup::{report, scan, CheckKind, ScanOptions};
+use cargo_checkup::{fix, report, scan, CheckKind, ScanOptions};
 use clap::{Parser, ValueEnum};
 
 /// Report projection selector. The two variants correspond bijectively to
@@ -34,7 +36,7 @@ enum Format {
 }
 
 /// Unified cargo health check: unused, outdated, duplicates, advisories,
-/// hygiene - one report.
+/// license policy, hygiene - one report, optional --fix.
 #[derive(Debug, Parser)]
 #[command(name = "cargo-checkup", version, about)]
 struct Cli {
@@ -53,6 +55,12 @@ struct Cli {
     /// Also flag optional dependencies that look unused.
     #[arg(long)]
     strict_unused: bool,
+    /// Apply all auto-fixes (unused removal, manifest fields, cargo update).
+    #[arg(long)]
+    fix: bool,
+    /// Print what --fix would do without changing anything.
+    #[arg(long)]
+    check: bool,
     /// Only run these checks (comma-separated).
     #[arg(long)]
     only: Option<String>,
@@ -73,6 +81,10 @@ struct Cli {
     config: Option<PathBuf>,
 }
 
+/// Normalizes the process argument vector into the tool grammar by excising
+/// the cargo-injected `checkup` token when present at position one. Pure
+/// function of the argument vector; performs no parsing itself, only the
+/// lexical normalization on which parsing depends.
 fn cargo_subcommand_args() -> Vec<String> {
     let mut args: Vec<String> = std::env::args().collect();
     // `cargo checkup ...` passes `checkup` as the first arg.
@@ -101,11 +113,12 @@ fn parse_kinds(s: &Option<String>, flag: &str) -> Result<Option<Vec<CheckKind>>,
     }
 }
 
-/// Main control flow: parse, scan, render, gate. Every leaf returns a
-/// member of the exit-code algebra documented in the module header; no path
-/// falls through and no path panics on user input (clap owns argument
-/// validation, and all fallible operations below it are `match`ed
-/// explicitly).
+/// Main control flow, structured as a decision tree over mode: the scan
+/// runs, then exactly one of the fix pipeline (`--fix`/`--check`) or the
+/// render-and-gate path executes. Every leaf returns a member of the
+/// exit-code algebra documented in the module header; no path falls through
+/// and no path panics on user input (clap owns argument validation, and all
+/// fallible operations below it are `match`ed explicitly).
 fn main() -> ExitCode {
     let cli = Cli::parse_from(cargo_subcommand_args());
 
@@ -130,7 +143,7 @@ fn main() -> ExitCode {
         baseline: cli.baseline.clone(),
         baseline_update: cli.baseline_update.clone(),
     };
-    let (rep, _cfg) = match scan(&opts) {
+    let (rep, cfg) = match scan(&opts) {
         Ok(r) => r,
         Err(e) => {
             eprintln!("error: failed to run checkup: {e:#}");
@@ -138,6 +151,44 @@ fn main() -> ExitCode {
         }
     };
 
+    // Repair branch. `--check` (dry run) prints the prospective actions to
+    // stdout and preserves gate semantics onward; `--fix` applies them,
+    // narrates to stderr (stdout stays machine-clean for potential piping),
+    // and returns 0 unless an action errored (2). The `cargo update`
+    // working directory is the scanned manifest's directory when known,
+    // else the process working directory, else the current directory
+    // sentinel - a total fallback chain with no failure mode.
+    if cli.fix || cli.check {
+        // Workspace root for `cargo update`: prefer the scanned manifest dir.
+        let root = cli
+            .manifest_path
+            .as_ref()
+            .and_then(|p| p.parent().map(|p| p.to_path_buf()))
+            .or_else(|| std::env::current_dir().ok())
+            .unwrap_or_else(|| PathBuf::from("."));
+        let outcome = fix::execute_fixes(&rep.findings, &cfg, &root, cli.check);
+        for a in &outcome.actions {
+            if cli.check {
+                println!("{a}");
+            } else {
+                eprintln!("fix: {a}");
+            }
+        }
+        for e in &outcome.errors {
+            eprintln!("fix error: {e}");
+        }
+        if cli.check {
+            // --check changes nothing; exit per findings.
+            return exit_for(&rep, fail_on.as_deref());
+        }
+        if !outcome.errors.is_empty() {
+            return ExitCode::from(2);
+        }
+        return ExitCode::from(0);
+    }
+
+    // Render-and-gate branch: project the report onto the selected format,
+    // then evaluate the gate predicate over it.
     match cli.format {
         Format::Human => print!("{}", report::render_human(&rep)),
         Format::Json => println!("{}", report::render_json(&rep)),
@@ -155,5 +206,9 @@ fn exit_for(rep: &cargo_checkup::Report, fail_on: Option<&[CheckKind]>) -> ExitC
         Some(kinds) => rep.has_failures_in(kinds),
         None => rep.has_failures(),
     };
-    if failed { ExitCode::from(1) } else { ExitCode::from(0) }
+    if failed {
+        ExitCode::from(1)
+    } else {
+        ExitCode::from(0)
+    }
 }

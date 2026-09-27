@@ -19,6 +19,7 @@ pub mod baseline;
 pub mod cache;
 pub mod checks;
 pub mod config;
+pub mod fix;
 pub mod model;
 pub mod report;
 
